@@ -6,13 +6,20 @@ import android.content.res.TypedArray;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.drawable.ColorDrawable;
 import android.support.v8.renderscript.Allocation;
 import android.support.v8.renderscript.Element;
 import android.support.v8.renderscript.RenderScript;
 import android.support.v8.renderscript.ScriptIntrinsicBlur;
 import android.util.AttributeSet;
+import android.util.TypedValue;
 import android.view.View;
+import android.widget.LinearLayout;
 
 /**
  * A custom view for presenting a dynamically blurred version of another view's content.
@@ -20,7 +27,18 @@ import android.view.View;
  * Use {@link #setBlurredView(android.view.View)} to set up the reference to the view to be blurred.
  * After that, call {@link #invalidate()} to trigger blurring whenever necessary.
  */
-public class BlurringView extends View {
+public class BlurringView extends LinearLayout {
+    private int mDownsampleFactor;
+    private int mOverlayColor;
+    private int mRadius;
+    private View mBlurredView;
+    private int mBlurredViewWidth, mBlurredViewHeight;
+    private boolean mDownsampleFactorChanged;
+    private Bitmap mBitmapToBlur, mBlurredBitmap;
+    private Canvas mBlurringCanvas;
+    private RenderScript mRenderScript;
+    private ScriptIntrinsicBlur mBlurScript;
+    private Allocation mBlurInput, mBlurOutput;
 
     public BlurringView(Context context) {
         this(context, null);
@@ -30,6 +48,7 @@ public class BlurringView extends View {
         super(context, attrs);
 
         final Resources res = getResources();
+        final int defaultCornerRadius = res.getInteger(R.integer.default_corner_radius);
         final int defaultBlurRadius = res.getInteger(R.integer.default_blur_radius);
         final int defaultDownsampleFactor = res.getInteger(R.integer.default_downsample_factor);
         final int defaultOverlayColor = res.getColor(R.color.default_overlay_color);
@@ -37,9 +56,9 @@ public class BlurringView extends View {
         initializeRenderScript(context);
 
         TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.PxBlurringView);
+        setCornerRadius(a.getColor(R.styleable.PxBlurringView_cornerRadius, defaultCornerRadius));
         setBlurRadius(a.getInt(R.styleable.PxBlurringView_blurRadius, defaultBlurRadius));
-        setDownsampleFactor(a.getInt(R.styleable.PxBlurringView_downsampleFactor,
-                defaultDownsampleFactor));
+        setDownsampleFactor(a.getInt(R.styleable.PxBlurringView_downsampleFactor, defaultDownsampleFactor));
         setOverlayColor(a.getColor(R.styleable.PxBlurringView_overlayColor, defaultOverlayColor));
         a.recycle();
     }
@@ -51,38 +70,78 @@ public class BlurringView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        if (mBlurredView != null) {
+        if (!isInEditMode() && mBlurredView != null) {
             if (prepare()) {
                 // If the background of the blurred view is a color drawable, we use it to clear
                 // the blurring canvas, which ensures that edges of the child views are blurred
                 // as well; otherwise we clear the blurring canvas with a transparent color.
-                if (mBlurredView.getBackground() != null && mBlurredView.getBackground() instanceof ColorDrawable){
+                if (mBlurredView.getBackground() != null && mBlurredView.getBackground() instanceof ColorDrawable)
                     mBitmapToBlur.eraseColor(((ColorDrawable) mBlurredView.getBackground()).getColor());
-                }else {
+                else
                     mBitmapToBlur.eraseColor(Color.TRANSPARENT);
-                }
 
+                int scrollX = mBlurredView.getScrollX();
+                int scrollY = mBlurredView.getScrollY();
+
+                mBlurringCanvas.save();
+                mBlurringCanvas.translate(-scrollX, -scrollY);
                 mBlurredView.draw(mBlurringCanvas);
+                mBlurringCanvas.restore();
                 blur();
 
-                canvas.save();
-                canvas.translate(mBlurredView.getX() - getX(), mBlurredView.getY() - getY());
-                canvas.scale(mDownsampleFactor, mDownsampleFactor);
-                canvas.drawBitmap(mBlurredBitmap, 0, 0, null);
-                canvas.restore();
+
+
+                canvas.drawBitmap(getRoundedCornerBitmap(getBluredBitmap(mBlurredBitmap), mRadius, getContext()), 0, 0, null);
             }
-            canvas.drawColor(mOverlayColor);
         }
     }
 
-    public void setBlurRadius(int radius) {
-        mBlurScript.setRadius(radius);
+    public Bitmap getBluredBitmap(Bitmap bitmap) {
+        Bitmap output = Bitmap.createBitmap(getWidth(), getHeight(), Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(output);
+
+        int x = (int) (getX() - mBlurredView.getX());
+        int y = (int) (getY() - mBlurredView.getY());
+
+        final Rect rect = new Rect(x / mDownsampleFactor, y / mDownsampleFactor, (x + getWidth()) / mDownsampleFactor, (y + getHeight()) / mDownsampleFactor);
+        final Rect rect1 = new Rect(0, 0, getWidth(), getHeight());
+
+        final Paint paint = new Paint();
+        paint.setFilterBitmap(true);
+        paint.setAntiAlias(true);
+
+        // draw bitmap
+        canvas.drawBitmap(bitmap, rect, rect1, paint);
+        canvas.drawColor(mOverlayColor);
+        return output;
+    }
+
+    public Bitmap getRoundedCornerBitmap(Bitmap bitmap, int cornerDips, Context context) {
+        Bitmap output = Bitmap.createBitmap(bitmap.getWidth(), bitmap.getHeight(), Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(output);
+
+        final int cornerSizePx = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, (float) cornerDips,
+                context.getResources().getDisplayMetrics());
+        final Paint paint = new Paint();
+        final Rect rect = new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight());
+        final RectF rectF = new RectF(rect);
+
+        // prepare canvas for transfer
+        paint.setAntiAlias(true);
+        paint.setColor(0xFFFFFFFF);
+        paint.setStyle(Paint.Style.FILL);
+        canvas.drawARGB(0, 0, 0, 0);
+        canvas.drawRoundRect(rectF, cornerSizePx, cornerSizePx, paint);
+
+        // draw bitmap
+        paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
+        canvas.drawBitmap(bitmap, rect, rect, paint);
+        return output;
     }
 
     public void setDownsampleFactor(int factor) {
-        if (factor <= 0) {
+        if (factor <= 0)
             throw new IllegalArgumentException("Downsample factor must be greater than 0.");
-        }
 
         if (mDownsampleFactor != factor) {
             mDownsampleFactor = factor;
@@ -90,9 +149,14 @@ public class BlurringView extends View {
         }
     }
 
-    public void setOverlayColor(int color) {
-        mOverlayColor = color;
+    public void setBlurRadius(int radius) {
+        mBlurScript.setRadius(radius);
     }
+
+    public void setOverlayColor(int color) { mOverlayColor = color; }
+
+    public void setCornerRadius(int radius) { mRadius = radius; }
+
 
     private void initializeRenderScript(Context context) {
         mRenderScript = RenderScript.create(context);
@@ -122,15 +186,13 @@ public class BlurringView extends View {
                     || mBlurredBitmap.getHeight() != scaledHeight) {
                 mBitmapToBlur = Bitmap.createBitmap(scaledWidth, scaledHeight,
                         Bitmap.Config.ARGB_8888);
-                if (mBitmapToBlur == null) {
+                if (mBitmapToBlur == null)
                     return false;
-                }
 
                 mBlurredBitmap = Bitmap.createBitmap(scaledWidth, scaledHeight,
                         Bitmap.Config.ARGB_8888);
-                if (mBlurredBitmap == null) {
+                if (mBlurredBitmap == null)
                     return false;
-                }
             }
 
             mBlurringCanvas = new Canvas(mBitmapToBlur);
@@ -152,22 +214,7 @@ public class BlurringView extends View {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
-        if (mRenderScript != null){
+        if (mRenderScript != null)
             mRenderScript.destroy();
-        }
     }
-
-    private int mDownsampleFactor;
-    private int mOverlayColor;
-
-    private View mBlurredView;
-    private int mBlurredViewWidth, mBlurredViewHeight;
-
-    private boolean mDownsampleFactorChanged;
-    private Bitmap mBitmapToBlur, mBlurredBitmap;
-    private Canvas mBlurringCanvas;
-    private RenderScript mRenderScript;
-    private ScriptIntrinsicBlur mBlurScript;
-    private Allocation mBlurInput, mBlurOutput;
-
 }
