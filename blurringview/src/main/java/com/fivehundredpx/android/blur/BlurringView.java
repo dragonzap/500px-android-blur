@@ -12,10 +12,10 @@ import android.graphics.PorterDuffXfermode;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.ColorDrawable;
-import android.support.v8.renderscript.Allocation;
-import android.support.v8.renderscript.Element;
-import android.support.v8.renderscript.RenderScript;
-import android.support.v8.renderscript.ScriptIntrinsicBlur;
+import android.renderscript.Allocation;
+import android.renderscript.Element;
+import android.renderscript.RenderScript;
+import android.renderscript.ScriptIntrinsicBlur;
 import android.util.AttributeSet;
 import android.util.TypedValue;
 import android.view.View;
@@ -53,14 +53,21 @@ public class BlurringView extends LinearLayout {
         final int defaultDownsampleFactor = res.getInteger(R.integer.default_downsample_factor);
         final int defaultOverlayColor = res.getColor(R.color.default_overlay_color);
 
-        initializeRenderScript(context);
+        final boolean isInEditMode = isInEditMode();
+        if (!isInEditMode)
+            initializeRenderScript(context);
 
         TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.PxBlurringView);
-        setCornerRadius(a.getColor(R.styleable.PxBlurringView_cornerRadius, defaultCornerRadius));
-        setBlurRadius(a.getInt(R.styleable.PxBlurringView_blurRadius, defaultBlurRadius));
+        if (!isInEditMode) {
+            setCornerRadius(a.getColor(R.styleable.PxBlurringView_cornerRadius, defaultCornerRadius));
+            setBlurRadius(a.getInt(R.styleable.PxBlurringView_blurRadius, defaultBlurRadius));
+        } else
+            setBackgroundColor(a.getColor(R.styleable.PxBlurringView_overlayColor, defaultOverlayColor));
         setDownsampleFactor(a.getInt(R.styleable.PxBlurringView_downsampleFactor, defaultDownsampleFactor));
         setOverlayColor(a.getColor(R.styleable.PxBlurringView_overlayColor, defaultOverlayColor));
         a.recycle();
+
+        setWillNotDraw(false);
     }
 
     public void setBlurredView(View blurredView) {
@@ -72,25 +79,13 @@ public class BlurringView extends LinearLayout {
         super.onDraw(canvas);
         if (!isInEditMode() && mBlurredView != null) {
             if (prepare()) {
-                // If the background of the blurred view is a color drawable, we use it to clear
-                // the blurring canvas, which ensures that edges of the child views are blurred
-                // as well; otherwise we clear the blurring canvas with a transparent color.
                 if (mBlurredView.getBackground() != null && mBlurredView.getBackground() instanceof ColorDrawable)
                     mBitmapToBlur.eraseColor(((ColorDrawable) mBlurredView.getBackground()).getColor());
                 else
                     mBitmapToBlur.eraseColor(Color.TRANSPARENT);
 
-                int scrollX = mBlurredView.getScrollX();
-                int scrollY = mBlurredView.getScrollY();
-
-                mBlurringCanvas.save();
-                mBlurringCanvas.translate(-scrollX, -scrollY);
                 mBlurredView.draw(mBlurringCanvas);
-                mBlurringCanvas.restore();
                 blur();
-
-
-
                 canvas.drawBitmap(getRoundedCornerBitmap(getBluredBitmap(mBlurredBitmap), mRadius, getContext()), 0, 0, null);
             }
         }
@@ -100,10 +95,19 @@ public class BlurringView extends LinearLayout {
         Bitmap output = Bitmap.createBitmap(getWidth(), getHeight(), Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(output);
 
-        int x = (int) (getX() - mBlurredView.getX());
-        int y = (int) (getY() - mBlurredView.getY());
+        // This position
+        int[] pos = new int[2];
+        this.getLocationOnScreen(pos);
 
-        final Rect rect = new Rect(x / mDownsampleFactor, y / mDownsampleFactor, (x + getWidth()) / mDownsampleFactor, (y + getHeight()) / mDownsampleFactor);
+        // Blurred positon
+        int[] pos1 = new int[2];
+        mBlurredView.getLocationOnScreen(pos1);
+
+        // Different
+        pos[0] -= pos1[0];
+        pos[1] -= pos1[1];
+
+        final Rect rect = new Rect(pos[0] / mDownsampleFactor, pos[1] / mDownsampleFactor, (pos[0] + getWidth()) / mDownsampleFactor, (pos[1] + getHeight()) / mDownsampleFactor);
         final Rect rect1 = new Rect(0, 0, getWidth(), getHeight());
 
         final Paint paint = new Paint();
@@ -112,7 +116,10 @@ public class BlurringView extends LinearLayout {
 
         // draw bitmap
         canvas.drawBitmap(bitmap, rect, rect1, paint);
-        canvas.drawColor(mOverlayColor);
+
+        if (mOverlayColor != Color.TRANSPARENT)
+            canvas.drawColor(mOverlayColor);
+
         return output;
     }
 
@@ -153,10 +160,13 @@ public class BlurringView extends LinearLayout {
         mBlurScript.setRadius(radius);
     }
 
-    public void setOverlayColor(int color) { mOverlayColor = color; }
+    public void setOverlayColor(int color) {
+        mOverlayColor = color;
+    }
 
-    public void setCornerRadius(int radius) { mRadius = radius; }
-
+    public void setCornerRadius(int radius) {
+        mRadius = radius;
+    }
 
     private void initializeRenderScript(Context context) {
         mRenderScript = RenderScript.create(context);
